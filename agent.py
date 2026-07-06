@@ -136,7 +136,103 @@ def run_local_tools(prompt, category):
             
     return context, early_answer
 
-def generate_remote(prompt, client, selected_model, category="unknown"):
+def fetch_model_metadata(model_id):
+    """
+    Fetch model metadata locally if available, fallback to Hugging Face API dynamically.
+    Returns tags and stop sequences.
+    """
+    tags = []
+    stop_sequences = []
+    
+    # Attempt local lookup first
+    local_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
+    try:
+        if os.path.exists(local_db_path):
+            with open(local_db_path, "r", encoding="utf-8") as f:
+                models_db = json.load(f)
+            
+            # Find the model in the list
+            model_data = next((m for m in models_db if m.get("id") == model_id), None)
+            
+            if model_data:
+                tags = model_data.get("tags", [])
+                config = model_data.get("config", {})
+                tokenizer_config = config.get("tokenizer_config", {})
+                
+                if "eos_token" in tokenizer_config:
+                    stop_sequences.append(tokenizer_config["eos_token"])
+                    
+                chat_template = config.get("chat_template_jinja", "")
+                if "<|im_end|>" in chat_template:
+                    stop_sequences.append("<|im_end|>")
+                if "<turn|>" in chat_template:
+                    stop_sequences.append("<turn|>")
+                
+                print(f"Loaded metadata for {model_id} from local models.json!")
+                return tags, stop_sequences
+    except Exception as e:
+        print(f"Error reading local models.json: {e}")
+
+    print(f"Model {model_id} not found locally, falling back to HTTP...")
+    try:
+        url = f"https://huggingface.co/api/models/{model_id}"
+        resp = requests.get(url, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            tags = data.get("tags", [])
+            
+            # Extract stop sequences
+            config = data.get("config", {})
+            tokenizer_config = config.get("tokenizer_config", {})
+            
+            if "eos_token" in tokenizer_config:
+                stop_sequences.append(tokenizer_config["eos_token"])
+                
+            chat_template = config.get("chat_template_jinja", "")
+            if "<|im_end|>" in chat_template:
+                stop_sequences.append("<|im_end|>")
+            if "<turn|>" in chat_template:
+                stop_sequences.append("<turn|>")
+                
+    except Exception as e:
+        print(f"Failed to fetch metadata for {model_id}: {e}")
+        
+    return tags, stop_sequences
+
+def build_routing_table(models):
+    """
+    Build a routing dictionary dynamically based on HF tags.
+    """
+    routing = {
+        "code_model": None,
+        "video_model": None,
+        "reasoning_model": None,
+        "general_model": None,
+        "stops": {}
+    }
+    
+    for model in models:
+        tags, stops = fetch_model_metadata(model)
+        routing["stops"][model] = stops if stops else ["<eos>"] # Fallback stop
+        
+        # Determine strengths
+        is_code = "coding" in tags or "custom_code" in tags or "code" in model.lower()
+        is_video = "video" in tags or "multimodal" in tags
+        is_reasoning = "reasoning" in tags or "math" in tags
+        
+        if is_code and not routing["code_model"]:
+            routing["code_model"] = model
+        if is_video and not routing["video_model"]:
+            routing["video_model"] = model
+        if is_reasoning and not routing["reasoning_model"]:
+            routing["reasoning_model"] = model
+            
+        if not routing["general_model"]:
+            routing["general_model"] = model
+            
+    return routing
+
+def generate_remote(prompt, client, selected_model, category="unknown", stop_sequences=None):
     """
     Hit the Fireworks API for hard tasks, with optimized system prompts to save tokens.
     """
@@ -157,7 +253,8 @@ def generate_remote(prompt, client, selected_model, category="unknown"):
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.0,
-                max_tokens=300
+                max_tokens=300,
+                stop=stop_sequences if stop_sequences else ["<eos>"]
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
@@ -209,6 +306,10 @@ def main():
     else:
         print("Running in dummy mode. Fireworks API calls will be simulated.")
 
+    # Build dynamic routing table
+    print("Building dynamic routing table...")
+    routing_table = build_routing_table(models)
+    
     # 3. Process each task
     results = []
     for task in tasks:
@@ -218,6 +319,15 @@ def main():
         # Pass 1: Classify
         category = classify_task(prompt, local_model)
         
+        # Dynamic Target Model Selection
+        target_model = routing_table["general_model"] or selected_model
+        if category in ["code_debugging", "code_generation"] and routing_table["code_model"]:
+            target_model = routing_table["code_model"]
+        elif category in ["logical_deductive_reasoning", "mathematical_reasoning"] and routing_table["reasoning_model"]:
+            target_model = routing_table["reasoning_model"]
+            
+        target_stops = routing_table["stops"].get(target_model, [])
+        
         # Pass 2: Execute based on category
         if category in ["sentiment_classification", "named_entity_recognition", "text_summarisation"]:
             answer = generate_local(prompt, local_model)
@@ -225,7 +335,7 @@ def main():
         elif category == "factual_knowledge":
             answer, confidence = generate_local_with_confidence(prompt, local_model)
             if confidence < 0.90:  # Strict confidence ceiling for facts
-                answer = generate_remote(prompt, client, selected_model, category)
+                answer = generate_remote(prompt, client, target_model, category, target_stops)
                 
         elif category in ["code_debugging", "code_generation", "mathematical_reasoning"]:
             tool_context, early_answer = run_local_tools(prompt, category)
@@ -233,11 +343,11 @@ def main():
                 answer = early_answer
             else:
                 augmented_prompt = prompt + tool_context
-                answer = generate_remote(augmented_prompt, client, selected_model, category)
+                answer = generate_remote(augmented_prompt, client, target_model, category, target_stops)
             
         else:
             # Default to remote for Logic, and unknown categories
-            answer = generate_remote(prompt, client, selected_model, category)
+            answer = generate_remote(prompt, client, target_model, category, target_stops)
 
         results.append({
             "task_id": task_id,
