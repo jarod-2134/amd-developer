@@ -5,42 +5,9 @@ import openai
 
 from pathlib import Path
 
-from generate_metadata import fetch_model_metadata
-from local_model import classify_task, init_local_model, generate_local, generate_local_with_confidence, run_local_tools, solve_math_locally
+from local_model import build_routing_table, build_routing_table_deterministic, classify_task, init_local_model, generate_local, generate_local_with_confidence, run_local_tools, solve_math_locally
 from remote_model import generate_remote
-
-def build_routing_table(models):
-    """
-    Build a routing dictionary dynamically based on HF tags.
-    """
-    routing = {
-        "code_model": None,
-        "video_model": None,
-        "reasoning_model": None,
-        "general_model": None,
-        "stops": {}
-    }
-    
-    for model in models:
-        tags, stops, efficiency_metrics = fetch_model_metadata(model)
-        routing["stops"][model] = stops if stops else ["<eos>"] # Fallback stop
-        
-        # Determine strengths
-        is_code = "coding" in tags or "custom_code" in tags or "code" in model.lower()
-        is_video = "video" in tags or "multimodal" in tags
-        is_reasoning = "reasoning" in tags or "math" in tags
-        
-        if is_code and not routing["code_model"]:
-            routing["code_model"] = model
-        if is_video and not routing["video_model"]:
-            routing["video_model"] = model
-        if is_reasoning and not routing["reasoning_model"]:
-            routing["reasoning_model"] = model
-            
-        if not routing["general_model"]:
-            routing["general_model"] = model
-            
-    return routing
+from generate_metadata import get_metadata_for_models
 
 def main():
     # 1. Read environment variables injected by the harness
@@ -56,6 +23,7 @@ def main():
 
     selected_model = models[0] if models else None
     project_root = Path(__file__).resolve().parent.parent
+    total_tokens = 0
 
     # 2. Read tasks from input file
     input_path = project_root / "input" / "tasks.json"
@@ -74,6 +42,9 @@ def main():
 
     # Initialize Local and Remote clients
     local_model = init_local_model()
+
+    # Fetch all metadata
+    get_metadata_for_models()
     
     # Initialize Fireworks API client
     client = None
@@ -87,7 +58,13 @@ def main():
 
     # Build dynamic routing table
     print("Building dynamic routing table...")
-    routing_table = build_routing_table(models)
+    routing_table = build_routing_table_deterministic(models, require_serverless=True)
+
+    print("Successfully build the routing table.")
+
+    for k, v in routing_table.items():
+        if k != "stops":
+            print(f"{k} -> {v}")
     
     # 3. Process each task
     results = []
@@ -96,10 +73,10 @@ def main():
         prompt = task.get("prompt")
         
         # Pass 1: Classify
-        category = classify_task(prompt, local_model)
+        category = classify_task(prompt)
         
         # Dynamic Target Model Selection
-        target_model = routing_table["general_model"] or selected_model
+        target_model = routing_table.get(category) if category != "" else selected_model
         print(f"Task {task_id}: Classified as '{category}'. Using model '{target_model}'.")
         if category in ["code_debugging", "code_generation"] and routing_table["code_model"]:
             target_model = routing_table["code_model"]
@@ -115,7 +92,10 @@ def main():
         elif category == "factual_knowledge":
             answer, confidence = generate_local_with_confidence(prompt, local_model)
             if confidence < 0.90:  # Strict confidence ceiling for facts
-                answer = generate_remote(prompt, client, target_model, category, target_stops)
+                response = generate_remote(prompt, client, target_model, category, target_stops)
+                answer = response.get("content")
+                print(f"Model: {selected_model} used {response.get("total_tokens")} tokens.")
+                total_tokens += response.get("total_tokens")
                 
         elif category in ["code_debugging", "code_generation", "mathematical_reasoning"]:
             tool_context, early_answer = run_local_tools(prompt, category)
@@ -123,11 +103,17 @@ def main():
                 answer = early_answer
             else:
                 augmented_prompt = prompt + tool_context
-                answer = generate_remote(augmented_prompt, client, target_model, category, target_stops)
+                response = generate_remote(augmented_prompt, client, target_model, category, target_stops)
+                answer = response.get("content")
+                print(f"Model: {selected_model} used {response.get("total_tokens")} tokens.")
+                total_tokens += response.get("total_tokens")
             
         else:
             # Default to remote for Logic, and unknown categories
-            answer = generate_remote(prompt, client, target_model, category, target_stops)
+            response = generate_remote(prompt, client, target_model, category, target_stops)
+            answer = response.get("content")
+            print(f"Model: {selected_model} used {response.get("total_tokens")} tokens.")
+            total_tokens += response.get("total_tokens")
 
         results.append({
             "task_id": task_id,
@@ -141,7 +127,7 @@ def main():
     output_path = output_folder / "results.json"
     output_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
-    print("Successfully processed all tasks.")
+    print(f"Successfully processed all tasks.\nUsing {total_tokens} tokens in total.")
     sys.exit(0)
 
 if __name__ == "__main__":
