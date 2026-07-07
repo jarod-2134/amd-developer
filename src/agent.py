@@ -33,11 +33,45 @@ def main():
     except FileNotFoundError:
         print(f"Input file not found: {input_path}")
         print("Using dummy tasks for local testing...")
+        # tasks = [
+        #     {"task_id": "t1", "prompt": "Summarise the following text in one sentence: The quick brown fox jumps over the lazy dog."},
+        #     {"task_id": "t2", "prompt": "What is 2 + 2?"},
+        #     {"task_id": "t3", "prompt": "Fix this bug: def foo(): retun 1"},
+        #     {"task_id": "t4", "prompt": "What is the capital of France?"}
+        # ]
         tasks = [
-            {"task_id": "t1", "prompt": "Summarise the following text in one sentence: The quick brown fox jumps over the lazy dog."},
-            {"task_id": "t2", "prompt": "What is 2 + 2?"},
-            {"task_id": "t3", "prompt": "Fix this bug: def foo(): retun 1"},
-            {"task_id": "t4", "prompt": "What is the capital of France?"}
+            {
+                "task_id": "t1_hard", 
+                "prompt": "Summarise the core macroeconomic conflict described here in exactly one sentence: The central bank aims to curb sticky core inflation by aggressively raising benchmark interest rates, which tightens credit conditions and suppresses consumer spending. However, the federal government is simultaneously rolling out a massive fiscal stimulus package for domestic infrastructure projects, which injects heavy liquidity back into the market and threatens to completely counteract the monetary tightening."
+            },
+            {
+                "task_id": "t2_hard", 
+                "prompt": "Solve this step-by-step: A cloud data pipeline processes 1200 records per minute using 2 parallel processing workers. If you scale up the infrastructure by adding 3 more identical workers, but the resulting network congestion drops the individual processing efficiency of *every* active worker by 15%, what is the new total throughput of the pipeline in records per minute?"
+            },
+            {
+                "task_id": "t3_hard", 
+                "prompt": "Identify the structural logical flaw in this Python code that causes index errors or skips elements during execution, and provide the corrected version:\n\ndef clean_inactive_users(users):\n    for i in range(len(users)):\n        if users[i]['status'] == 'inactive':\n            del users[i]\n    return users"
+            },
+            {
+                "task_id": "t4_hard", 
+                "prompt": "Which sovereign nation, when accounting for all of its global overseas territories and dependencies, possesses the highest number of distinct geographic time zones, and exactly how many does it hold?"
+            },
+            {
+                "task_id": "t5_hard", 
+                "prompt": "Extract all distinct Named Entities from this sentence, classifying them strictly into a clean list of PERSON, ORG, or LOCATION: 'Last Tuesday, Apple Martin took a flight to visit the Orange manufacturing facility in Orange County to finalize the cloud acquisition contract with asset managers representing Blackrock.'"
+            },
+            {
+                "task_id": "t6_hard", 
+                "prompt": "Generate a clean, optimized Python function utilizing a sliding window approach to determine the length of the longest substring without repeating characters. Include appropriate type hints and a clean docstring."
+            },
+            {
+                "task_id": "t7_hard", 
+                "prompt": "Deduce the solution based on these constraints: 1) Alex, Blake, and Casey each live in a different colored house: Red, Blue, or Green. 2) The resident of the Red house strictly drinks coffee. 3) Blake does not live in the Green house. 4) Casey lives directly adjacent to the Blue house and strictly drinks water. Who lives in the Red house?"
+            },
+            {
+                "task_id": "t8_hard", 
+                "prompt": "Classify the overall sentiment of this user review as Positive, Negative, or Neutral, and provide a single-sentence justification: 'I went into the theater fully expecting to despise this sci-fi reboot after the abysmal trailers. Amazingly, the witty dialogue and spectacular cinematography actually salvaged the second half, though the unearned cliffhanger ending still leaves an incredibly sour taste in my mouth.'"
+            }
         ]
 
     # Initialize Local and Remote clients
@@ -94,7 +128,7 @@ def main():
             if confidence < 0.90:  # Strict confidence ceiling for facts
                 response = generate_remote(prompt, client, target_model, category, target_stops)
                 answer = response.get("content")
-                print(f"Model: {selected_model} used {response.get("total_tokens")} tokens.")
+                print(f"Model: {target_model} used {response.get("total_tokens")} tokens.")
                 total_tokens += response.get("total_tokens")
                 
         elif category in ["code_debugging", "code_generation", "mathematical_reasoning"]:
@@ -105,14 +139,14 @@ def main():
                 augmented_prompt = prompt + tool_context
                 response = generate_remote(augmented_prompt, client, target_model, category, target_stops)
                 answer = response.get("content")
-                print(f"Model: {selected_model} used {response.get("total_tokens")} tokens.")
+                print(f"Model: {target_model} used {response.get("total_tokens")} tokens.")
                 total_tokens += response.get("total_tokens")
             
         else:
             # Default to remote for Logic, and unknown categories
             response = generate_remote(prompt, client, target_model, category, target_stops)
             answer = response.get("content")
-            print(f"Model: {selected_model} used {response.get("total_tokens")} tokens.")
+            print(f"Model: {target_model} used {response.get("total_tokens")} tokens.")
             total_tokens += response.get("total_tokens")
 
         results.append({
