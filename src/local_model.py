@@ -2,10 +2,26 @@ import requests
 import json
 import re
 import ast
+import ollama
+
+from typing import Literal
+from pydantic import BaseModel
+
+class TaskClassifier(BaseModel):
+    category: Literal[
+        "Factual knowledge", # Explaining concepts, definitions, and how things work
+        "Mathematical reasoning", # Multi-step arithmetic, percentages, word problems, projections
+        "Sentiment classification", # Labelling sentiment and justifying the classification
+        "Text summarisation", # Condensing passages to a specific format or length constraint
+        "Named entity recognition", # Extracting and labelling entities (person, org, location, date)
+        "Code debugging", # Identifying bugs in code snippets and providing corrected implementations
+        "Logical / deductive reasoning", # Constraint-based puzzles where all conditions must be satisfied
+        "Code generation" # Writing correct, well-structured functions from a spec
+    ]
 
 def init_local_model():
     """
-    Initialize local model connection. Since we're using Ollama, 
+    Initialize local model connection. Since we're using Ollama,
     we just define the local endpoint url.
     """
     print("Initializing local Ollama connection...")
@@ -17,7 +33,7 @@ def generate_local(prompt, local_url):
     """
     try:
         payload = {
-            "model": "qwen2.5:7b",
+            "model": "qwen3:14b",
             "prompt": prompt,
             "stream": False,
             "options": {
@@ -34,10 +50,10 @@ def generate_local(prompt, local_url):
     except requests.exceptions.RequestException:
         # Fallback if Ollama isn't running yet during dev
         return f"[LOCAL PLACEHOLDER] Answer for: {prompt[:30]}..."
-    
+
 def generate_local_with_confidence(prompt, local_url):
     """
-    Local inference with confidence scoring. 
+    Local inference with confidence scoring.
     Ollama does not natively return logprobs in the /api/generate endpoint currently.
     Workaround: Ask the model to output a confidence score, or just fallback if it fails.
     Returns (answer, confidence_score).
@@ -46,7 +62,7 @@ def generate_local_with_confidence(prompt, local_url):
         # We prompt the model to output JSON with a confidence score
         system_prompt = "You are a fact-checking AI. Provide the answer and a confidence score from 0.0 to 1.0 in JSON format: {\"answer\": \"...\", \"confidence\": 0.95}"
         payload = {
-            "model": "qwen2.5:7b",
+            "model": "qwen3:14b",
             "prompt": f"{system_prompt}\n\nQuestion: {prompt}",
             "stream": False,
             "format": "json",
@@ -67,7 +83,7 @@ def generate_local_with_confidence(prompt, local_url):
         # Dummy fallback
         answer = f"[LOCAL FACT PLACEHOLDER] Answer for: {prompt[:30]}..."
         return answer, 0.95
-    
+
 def solve_math_locally(prompt):
     """
     Attempt to solve simple arithmetic locally.
@@ -83,7 +99,7 @@ def solve_math_locally(prompt):
             elif op == '-': ans = num1 - num2
             elif op == '*': ans = num1 * num2
             elif op == '/': ans = num1 / num2
-            
+
             if ans.is_integer():
                 ans = int(ans)
             return str(ans)
@@ -98,7 +114,7 @@ def lint_code_locally(prompt):
     """
     code_match = re.search(r'```(?:python)?\n(.*?)\n```', prompt, re.DOTALL)
     code_to_check = code_match.group(1) if code_match else prompt
-    
+
     try:
         ast.parse(code_to_check)
         return ""
@@ -114,12 +130,38 @@ def run_local_tools(prompt, category):
     """
     context = ""
     early_answer = None
-    
+
     if category == "code_debugging":
         context = lint_code_locally(prompt)
     elif category == "mathematical_reasoning":
         ans = solve_math_locally(prompt)
         if ans is not None:
             early_answer = ans
-            
+
     return context, early_answer
+
+def classify_task(task, local_url) -> str:
+    prompt = f"Classify the following task: {task}"
+
+    try:
+        payload = {
+            "model": "qwen3:14b",
+            "prompt": f"Question: {prompt}",
+            "stream": False,
+            "format": TaskClassifier.model_json_schema(),
+            "options": {
+                "num_predict": 50, # JSON response should be very short
+                "num_ctx": 1024,
+                "temperature": 0.0
+            }
+        }
+        resp = requests.post(local_url, json=payload, timeout=25)
+        if resp.status_code == 200:
+            data = resp.json().get("response", "{}")
+            category = json.loads(data).get("category", "")
+            return category
+        else:
+            return ""
+    except Exception as e:
+        print(f"Failed to classify task: {e}")
+        return ""

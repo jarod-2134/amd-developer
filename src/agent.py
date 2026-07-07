@@ -6,24 +6,8 @@ import openai
 from pathlib import Path
 
 from generate_metadata import fetch_model_metadata
-from local_model import init_local_model, generate_local, generate_local_with_confidence, run_local_tools, solve_math_locally
+from local_model import classify_task, init_local_model, generate_local, generate_local_with_confidence, run_local_tools, solve_math_locally
 from remote_model import generate_remote
-
-def classify_task(prompt, local_url):
-    """
-    Placeholder to classify the task into one of the 8 categories.
-    In reality, we would use the local model or a lightweight classifier here.
-    """
-    # Dummy logic for demonstration
-    if "summarise" in prompt.lower():
-        return "text_summarisation"
-    elif "bug" in prompt.lower() or "fix" in prompt.lower():
-        return "code_debugging"
-    elif "+" in prompt or "calculate" in prompt.lower():
-        return "mathematical_reasoning"
-    elif "capital of" in prompt.lower() or "who is" in prompt.lower():
-        return "factual_knowledge"
-    return "unknown" # Default fallback
 
 def build_routing_table(models):
     """
