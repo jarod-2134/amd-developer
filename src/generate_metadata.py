@@ -9,67 +9,89 @@ load_dotenv()  # Load environment variables from .env file
 
 models = os.environ.get("ALLOWED_MODELS", "").split(",")
 
+
+def _model_slug(model_id: str) -> str:
+    """Extract the short model slug (e.g. 'minimax-m3') from a full or short id."""
+    return model_id.split("/")[-1]
+
+
 def _get_model_metadata(model_id):
     """
     Fetch metadata for a given model ID directly from the Fireworks REST API.
     Safely handles both full paths and short model slugs.
     """
-    # Extract only the short model slug (e.g., 'minimax-m3') if a full path was passed
-    model_slug = model_id.split("/")[-1]
-    
+    model_slug = _model_slug(model_id)
+
     url = f"https://api.fireworks.ai/v1/accounts/fireworks/models/{model_slug}"
     headers = {
         "Authorization": f"Bearer {os.environ.get('FIREWORKS_API_KEY')}",
         "Accept": "application/json"
     }
-    
+
     response = requests.get(url, headers=headers)
     response.raise_for_status()  # Will raise an exception for 4xx/5xx errors
     return response.json()
 
+
 def save_model_metadata_to_file(model_id, metadata):
     """
-    Save the model metadata to a JSON file.
+    Save the model metadata to a JSON file. Uses the model SLUG as the filename
+    so it matches how fetch_single_profile reads it back (slug-based lookup).
     """
     project_root = Path(__file__).resolve().parent.parent
     folder_path = project_root / "metadata"
     folder_path.mkdir(parents=True, exist_ok=True)  # Create the folder if it doesn't exist
 
-    file_path = folder_path / f"{model_id}.json"
+    # Use the slug, not the full id, so paths with slashes don't create nested dirs
+    # and so fetch_single_profile (which reads by slug) can find the file.
+    slug = _model_slug(model_id)
+    file_path = folder_path / f"{slug}.json"
     json_string = json.dumps(metadata, indent=2)  # Convert metadata to JSON string with indentation
 
     file_path.write_text(json_string, encoding="utf-8")  # Write the JSON string to the file
 
+
 def get_metadata_for_models():
     """
-    Fetch and save metadata for all allowed models.
+    Fetch and save metadata for all allowed models. Resilient: a failure for one
+    model is logged but does not abort the run, and a bundled metadata/ file
+    (shipped in the image) is left intact as a fallback when the API is
+    unreachable or rate-limited.
     """
     for model_id in models:
-        metadata = _get_model_metadata(model_id)
-        save_model_metadata_to_file(model_id, metadata)
+        if not model_id:
+            continue
+        try:
+            metadata = _get_model_metadata(model_id)
+            save_model_metadata_to_file(model_id, metadata)
+        except Exception as e:
+            # Don't let one model's failure kill the whole run — the bundled
+            # metadata/*.json shipped in the image will be used as a fallback.
+            print(f"Warning: could not fetch metadata for {model_id}: {e}")
+
 
 def fetch_model_metadata_from_file(file_path: Path):
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             model_data = json.load(f)
-        
+
         model_id = model_data.get("name", file_path.stem)
         details = model_data.get("base_model_details", {}) or model_data.get("baseModelDetails", {})
-        
+
         efficiency_metrics = {
             "parameter_count": None,
             "is_moe": details.get("moe", False),
             "supports_tools": model_data.get("supports_tools") or model_data.get("supportsTools", False),
             "context_length": model_data.get("context_length") or model_data.get("contextLength", 4096)
         }
-        
+
         try:
             raw_params = details.get("parameter_count") or details.get("parameterCount")
             if raw_params:
                 efficiency_metrics["parameter_count"] = int(raw_params)
         except ValueError:
             pass
-            
+
         tags = []
         if efficiency_metrics["supports_tools"]: tags.append("tools")
         if efficiency_metrics["is_moe"]: tags.append("moe")
@@ -78,7 +100,7 @@ def fetch_model_metadata_from_file(file_path: Path):
         conv_config = model_data.get("conversation_config", {}) or model_data.get("conversationConfig", {})
         chat_template = conv_config.get("template", "")
         all_text_configs = f"{chat_template} {model_data.get('description', '')}"
-        
+
         stop_sequences = []
         if "<|im_end|>" in all_text_configs: stop_sequences.append("<|im_end|>")
         if "<turn|>" in all_text_configs: stop_sequences.append("<turn|>")

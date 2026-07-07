@@ -14,15 +14,23 @@ COPY requirements.txt ./
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Start Ollama in the background, pull the Qwen 2.5 7B model, and let the build step finish
-RUN ollama serve & sleep 5 && ollama pull qwen2.5:7b
+# Start Ollama in the background, pull the local model, and let the build step finish.
+# LOCAL_MODEL in src/local_model.py must match the model pulled here.
+# NOTE: qwen3:14b (q4) is ~9GB; total image must stay under the 10GB compressed limit.
+# If the built image exceeds 10GB, switch this line (and LOCAL_MODEL in local_model.py)
+# to "qwen2.5:7b" which is materially smaller.
+RUN ollama serve & sleep 5 && ollama pull qwen3:14b
 
-# Copy the rest of the application code
-COPY agent.py ./
+# Copy all application modules (agent.py imports the others)
+COPY src/agent.py src/local_model.py src/remote_model.py src/generate_metadata.py ./
+
+# Bundled metadata fallback (used if the runtime metadata API fetch fails)
+COPY metadata ./metadata
+
 COPY start.sh ./
 RUN chmod +x start.sh
 
-# Create input and output directories so local runs don't fail immediately 
+# Create input and output directories so local runs don't fail immediately
 # (In the evaluation environment, these will be mounted by the harness)
 RUN mkdir -p /input /output
 
