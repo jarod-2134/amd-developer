@@ -142,7 +142,7 @@
     "teft_details": null,
     "training_context_length": 65536,
     "tunable": true,
-    "update_time": "2026-07-07T09:24:36.026072Z",
+    "update_time": "2026-07-07T09:54:35.216367Z",
     "use_hf_apply_chat_template": false,
     "baseModelDetails": {
         "checkpointFormat": "HUGGINGFACE",
@@ -279,7 +279,7 @@
     "supportsTools": true,
     "teftDetails": null,
     "trainingContextLength": 65536,
-    "updateTime": "2026-07-07T09:24:36.026072Z",
+    "updateTime": "2026-07-07T09:54:35.216367Z",
     "useHfApplyChatTemplate": false,
     "useTrainingV2": true
 }
