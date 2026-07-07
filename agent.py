@@ -37,13 +37,17 @@ def generate_local(prompt, local_url):
     Zero-cost local inference via Ollama.
     """
     try:
-        # We assume the model 'llama3' (or phi3) is pulled in your Docker container
         payload = {
-            "model": "llama3",
+            "model": "qwen2.5:7b",
             "prompt": prompt,
-            "stream": False
+            "stream": False,
+            "options": {
+                "num_predict": 100, # Cap generation to save time
+                "num_ctx": 1024,
+                "temperature": 0.0
+            }
         }
-        resp = requests.post(local_url, json=payload, timeout=10)
+        resp = requests.post(local_url, json=payload, timeout=25)
         if resp.status_code == 200:
             return resp.json().get("response", "").strip()
         else:
@@ -63,12 +67,17 @@ def generate_local_with_confidence(prompt, local_url):
         # We prompt the model to output JSON with a confidence score
         system_prompt = "You are a fact-checking AI. Provide the answer and a confidence score from 0.0 to 1.0 in JSON format: {\"answer\": \"...\", \"confidence\": 0.95}"
         payload = {
-            "model": "llama3",
+            "model": "qwen2.5:7b",
             "prompt": f"{system_prompt}\n\nQuestion: {prompt}",
             "stream": False,
-            "format": "json"
+            "format": "json",
+            "options": {
+                "num_predict": 50, # JSON response should be very short
+                "num_ctx": 1024,
+                "temperature": 0.0
+            }
         }
-        resp = requests.post(local_url, json=payload, timeout=10)
+        resp = requests.post(local_url, json=payload, timeout=25)
         if resp.status_code == 200:
             data = resp.json().get("response", "{}")
             parsed = json.loads(data)
