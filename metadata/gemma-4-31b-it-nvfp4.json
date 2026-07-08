@@ -77,7 +77,7 @@
   "teftDetails": null,
   "trainingContextLength": 131072,
   "tunable": false,
-  "updateTime": "2026-07-08T12:48:19.400921Z",
+  "updateTime": "2026-07-08T16:48:21.245020Z",
   "useHfApplyChatTemplate": true,
   "useTrainingV2": false
 }

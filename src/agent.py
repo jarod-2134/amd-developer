@@ -5,35 +5,64 @@ import openai
 
 from pathlib import Path
 
-from local_model import init_local_model, generate_local, generate_local_with_confidence, run_local_tools, LOCAL_MODEL_ID
+from confidence import estimate_local_confidence, should_use_local
+from local_model import (
+    CATEGORIES,
+    LOCAL_FIRST_CATEGORIES,
+    LOCAL_MODEL_ID,
+    build_routing_table,
+    build_routing_table_deterministic,
+    classify_task,
+    init_local_model,
+    run_local_prework,
+)
 from remote_model import generate_remote
 from generate_metadata import get_metadata_for_models
-from classifier import classify_task
-from routing import build_routing_table_deterministic
-from confidence import estimate_local_confidence, should_use_local
 
-LOCAL_FIRST_CATEGORIES = {
-    "sentiment_classification",
-    "text_summarisation",
-    "named_entity_recognition",
-    "factual_knowledge",
-    "code_debugging",
-    "code_generation",
-    "mathematical_reasoning",
-}
 
-def resolve_target(routing_table, category, selected_model):
-    """Pull the remote model + stop sequences for a category, with a safe fallback."""
-    entry = routing_table.get(category) if category else None
-    target_model = entry.get("remote") if entry else selected_model
-    target_stops = routing_table.get("stops", {}).get(target_model, [])
-    return target_model, target_stops
+def _project_root() -> Path:
+    """
+    Resolve the project root robustly.
 
-def call_remote(prompt, client, target_model, category, target_stops):
-    response = generate_remote(prompt, client, target_model, category, target_stops)
-    tokens = response.get("total_tokens", 0)
-    print(f"Model: {target_model} used {tokens} tokens.")
-    return response.get("content"), tokens
+    In the Docker container the app lives at /app/agent.py, so parent.parent
+    would resolve to '/' (wrong). Prefer the current working directory when it
+    looks like the app directory; otherwise fall back to the file's parent.
+    """
+    cwd = Path.cwd()
+    # /app (container) or the repo root (local dev where cwd is the repo root)
+    if (cwd / "metadata").exists() or (cwd / "src").exists() or (cwd / "agent.py").exists():
+        return cwd
+    return Path(__file__).resolve().parent.parent
+
+
+def build_confirm_prompt(prompt, category, draft, context):
+    """
+    Build a tight 'confirm and refine' prompt for the remote model.
+
+    Passing a local draft lets the remote model skip full re-derivation, which
+    cuts completion tokens and latency while preserving accuracy (the remote
+    model still verifies and corrects). The instruction is category-specific so
+    the final output matches what the LLM-Judge expects.
+    """
+    confirm_instructions = {
+        "Mathematical reasoning": "Verify the draft solution. Respond with ONLY the final numerical answer.",
+        "Code debugging": "Verify the draft fix. Provide ONLY the final corrected code, no explanations.",
+        "Code generation": "Verify and refine the draft. Provide ONLY the final code, no explanations.",
+        "Factual knowledge": "Verify the draft answer. Answer as concisely as possible.",
+        "Sentiment classification": "Verify the draft. Respond as 'LABEL: one-sentence justification'.",
+        "Named entity recognition": "Verify the draft entities. List as 'TYPE: value', one per line. No prose.",
+        "Text summarisation": "Verify the draft summary follows the task's length/format constraint. Provide ONLY the summary.",
+        "Logical / deductive reasoning": "Verify the draft. Provide ONLY the final answer.",
+    }
+    instr = confirm_instructions.get(category, "Verify and refine. Provide a concise final answer.")
+
+    parts = [f"{instr}", "", f"Task: {prompt}"]
+    if draft:
+        parts.append(f"Draft answer: {draft}")
+    if context:
+        parts.append(context.strip())
+    parts.append("Final answer:")
+    return "\n".join(parts)
 
 
 def main():
@@ -41,14 +70,14 @@ def main():
     try:
         api_key = os.environ["FIREWORKS_API_KEY"]
         base_url = os.environ["FIREWORKS_BASE_URL"]
-        models = os.environ["ALLOWED_MODELS"].split(",")
+        models = [m.strip() for m in os.environ["ALLOWED_MODELS"].split(",") if m.strip()]
     except KeyError as e:
         print(f"Missing required environment variable: {e}")
         print("Bypassing for local testing...")
         api_key, base_url, models = "dummy", "dummy", ["dummy-model"]
 
     selected_model = models[0] if models else None
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = _project_root()
     total_tokens = 0
 
     # 2. Read tasks from input file
@@ -59,12 +88,6 @@ def main():
     except FileNotFoundError:
         print(f"Input file not found: {input_path}")
         print("Using dummy tasks for local testing...")
-        # tasks = [
-        #     {"task_id": "t1", "prompt": "Summarise the following text in one sentence: The quick brown fox jumps over the lazy dog."},
-        #     {"task_id": "t2", "prompt": "What is 2 + 2?"},
-        #     {"task_id": "t3", "prompt": "Fix this bug: def foo(): retun 1"},
-        #     {"task_id": "t4", "prompt": "What is the capital of France?"}
-        # ]
         tasks = [
             {
                 "task_id": "t1_hard",
@@ -103,7 +126,7 @@ def main():
     # Initialize Local and Remote clients
     local_model = init_local_model()
 
-    # Fetch all metadata
+    # Fetch all metadata (resilient: bundled metadata/ is a fallback)
     get_metadata_for_models()
 
     # Initialize Fireworks API client
@@ -118,13 +141,22 @@ def main():
 
     # Build dynamic routing table
     print("Building dynamic routing table...")
-    routing_table = build_routing_table_deterministic(models, require_serverless=True)
+    routing_table = build_routing_table(models, require_serverless=True)
 
-    print("Successfully build the routing table.")
+    # Guard: if no serverless models passed the filter (or metadata was missing),
+    # fall back to routing every category to the first allowed model so the run
+    # never crashes on a missing key.
+    if not routing_table:
+        print("⚠️ Routing table is empty — falling back to a single-model table.")
+        fallback_model = selected_model or "dummy-model"
+        routing_table = {cat: fallback_model for cat in CATEGORIES}
+        routing_table["stops"] = {}
 
+    print("Successfully built the routing table.")
     for k, v in routing_table.items():
         if k != "stops":
-            print(f"{k} -> remote: {v.get("remote")}, local: {v.get("local")}")
+            # print(f"{k} -> remote: {v.get("remote")}, local: {v.get("local")}")
+            print(f"{k} -> {v}")
 
     # 3. Process each task
     results = []
@@ -132,39 +164,61 @@ def main():
         task_id = task.get("task_id")
         prompt = task.get("prompt")
 
-        category = classify_task(prompt)
-        target_model, target_stops = resolve_target(routing_table, category, selected_model)
-        print(f"Task {task_id}: Classified as '{category}'. Using model '{target_model}'.")
+        # Pass 1: Classify (category + difficulty) — local, zero tokens
+        category, difficulty = classify_task(prompt)
+
+        # Resolve the target model + stop sequences for this category.
+        if category in routing_table:
+            target_model = routing_table[category]
+        else:
+            # Unknown / empty category → use the first allowed model.
+            target_model = selected_model
+        target_stops = routing_table.get("stops", {}).get(target_model, [])
+
+        print(f"Task {task_id}: Classified as '{category}' (difficulty={difficulty}). "
+              f"Using model '{target_model}'.")
+
+        # Pass 2: Local prework (draft + deterministic context + confidence).
+        # This runs for EVERY task — local tokens are free per Track 1 rules.
+        draft, context, confidence = run_local_prework(prompt, category, difficulty, local_model)
+        # confidence = estimate_local_confidence(prompt, category, draft, local_model, LOCAL_MODEL_ID)
 
         answer = None
-        tokens_used = 0
 
-        early_answer = None
-        tool_context = ""
-        if category in ("code_debugging", "code_generation", "mathematical_reasoning"):
-            tool_context, early_answer = run_local_tools(prompt, category)
-
-        if early_answer is not None:
-            answer = early_answer
-
-        elif category in LOCAL_FIRST_CATEGORIES:
-            local_answer = generate_local(prompt, local_model)
-            confidence = estimate_local_confidence(
-                prompt, category, local_answer, local_model, LOCAL_MODEL_ID
-            )
-            print(f"Task {task_id}: local confidence = {confidence}")
-
-            if should_use_local(category, confidence):
-                answer = local_answer
-            else:
-                augmented_prompt = prompt + tool_context if tool_context else prompt
-                answer, tokens_used = call_remote(augmented_prompt, client, target_model, category, target_stops)
-
+        # --- Local-only gate: answer for free when easy + confident ----------
+        # Only for capability domains where a local answer can be judge-accurate,
+        # and only when the model is confident. Otherwise we escalate.
+        if (
+            category in LOCAL_FIRST_CATEGORIES
+            and (difficulty == "easy" or difficulty == "medium")
+            and should_use_local(category, confidence)
+            and draft
+        ):
+            answer = draft
+            print(f"Task {task_id}: answered locally (confidence={confidence}). 0 tokens.")
         else:
-            answer, tokens_used = call_remote(prompt, client, target_model, category, target_stops)
+            print(f"Task {task_id}: answering remote (confidence={confidence}).")
 
-        total_tokens += tokens_used
-        results.append({"task_id": task_id, "answer": answer})
+        # --- Prework + confirm: every other case goes to remote --------------
+        # The local draft is passed to the remote model to verify/refine, which
+        # minimizes the remote completion length (and thus tokens).
+        if answer is None:
+            confirm_prompt = build_confirm_prompt(prompt, category, draft, context)
+            response = generate_remote(confirm_prompt, client, target_model, category, target_stops)
+            answer = response.get("content")
+            tok = response.get("total_tokens", 0)
+            print(f"Task {task_id}: remote confirm used {tok} tokens.")
+            total_tokens += tok
+
+        # Safety net: if everything failed, fall back to the local draft (even
+        # if low-confidence) so we always emit an answer rather than empty.
+        if not answer:
+            answer = draft or "[NO ANSWER]"
+
+        results.append({
+            "task_id": task_id,
+            "answer": answer
+        })
 
     # 4. Write results to output file
     output_folder = project_root / "output"
@@ -175,6 +229,7 @@ def main():
 
     print(f"Successfully processed all tasks.\nUsing {total_tokens} tokens in total.")
     sys.exit(0)
+
 
 if __name__ == "__main__":
     main()
