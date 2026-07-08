@@ -9,19 +9,10 @@ from pydantic import BaseModel, Field
 from pathlib import Path
 from ollama import AsyncClient
 
+from classifier import TaskClassifier
 from generate_metadata import fetch_model_metadata_from_file
 
-class TaskClassifier(BaseModel):
-    category: Literal[
-        "Factual knowledge", # Explaining concepts, definitions, and how things work
-        "Mathematical reasoning", # Multi-step arithmetic, percentages, word problems, projections
-        "Sentiment classification", # Labelling sentiment and justifying the classification
-        "Text summarisation", # Condensing passages to a specific format or length constraint
-        "Named entity recognition", # Extracting and labelling entities (person, org, location, date)
-        "Code debugging", # Identifying bugs in code snippets and providing corrected implementations
-        "Logical / deductive reasoning", # Constraint-based puzzles where all conditions must be satisfied
-        "Code generation" # Writing correct, well-structured functions from a spec
-    ]
+LOCAL_MODEL_ID = "qwen2.5:3b-instruct"
 
 class DynamicRoutingTable(BaseModel):
     factual_knowledge: str = Field(
@@ -77,11 +68,11 @@ def generate_local(prompt, local_url):
     """
     try:
         payload = {
-            "model": "qwen3:14b",
+            "model": LOCAL_MODEL_ID,
             "prompt": prompt,
             "stream": False,
             "options": {
-                "num_predict": 100, # Cap generation to save time
+                "num_predict": 500, # Cap generation to save time
                 "num_ctx": 1024,
                 "temperature": 0.0
             }
@@ -91,7 +82,7 @@ def generate_local(prompt, local_url):
             return resp.json().get("response", "").strip()
         else:
             return f"[LOCAL ERROR] {resp.status_code}"
-    except requests.exceptions.RequestException:
+    except requests.exceptions.RequestException as e:
         # Fallback if Ollama isn't running yet during dev
         return f"[LOCAL PLACEHOLDER] Answer for: {prompt[:30]}..."
 
@@ -191,7 +182,7 @@ def classify_task(task: str) -> str:
     """
     try:
         response = ollama.generate(
-            model="qwen3:14b",
+            model=LOCAL_MODEL_ID,
             prompt=f"Classify the following task: {task}",
             # Pass your Pydantic schema structure directly into the format argument
             format=TaskClassifier.model_json_schema(),
@@ -327,7 +318,7 @@ def build_routing_table(model_ids: List[str], require_serverless: bool = True, l
 
     try:
         payload = {
-            "model": "qwen3:14b",
+            "model": LOCAL_MODEL_ID,
             "prompt": prompt,
             "stream": False,
             "format": DynamicRoutingTable.model_json_schema(),
