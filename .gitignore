@@ -8,3 +8,7 @@ input/
 output/
 metadata/
 .vscode
+
+models/
+
+image.tar

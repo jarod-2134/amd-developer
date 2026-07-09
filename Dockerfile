@@ -15,14 +15,10 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Start Ollama in the background, pull the local model, and let the build step finish.
-# LOCAL_MODEL in src/local_model.py must match the model pulled here.
-# NOTE: qwen3:14b (q4) is ~9GB; total image must stay under the 10GB compressed limit.
-# If the built image exceeds 10GB, switch this line (and LOCAL_MODEL in local_model.py)
-# to "qwen2.5:7b" which is materially smaller.
-RUN ollama serve & sleep 5 && ollama pull qwen3:14b
+RUN ollama serve & sleep 5 && ollama pull qwen2.5:3b-instruct
 
 # Copy all application modules (agent.py imports the others)
-COPY src/agent.py src/local_model.py src/remote_model.py src/generate_metadata.py ./
+COPY src/ ./
 
 # Bundled metadata fallback (used if the runtime metadata API fetch fails)
 COPY metadata ./metadata
